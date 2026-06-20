@@ -33,6 +33,7 @@
 		"lib": ["ESNext", "esnext.disposable"],
 		"target": "ESNext",
 		"skipLibCheck": true,
+		"types": ["bun"],
 		"useDefineForClassFields": true
 	},
 	"exclude": ["node_modules"]

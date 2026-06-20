@@ -1,6 +1,3 @@
-import { Buffer } from "node:buffer";
-import type { IncomingMessage } from "node:http";
-import Websocket from "ws";
 import { OpCodes, ShoukakuClientInfo, State, Versions } from "../Constants.js";
 import type { NodeOption, Shoukaku, ShoukakuEvents } from "../Shoukaku.js";
 import { TypedEventEmitter, wait } from "../Utils.js";
@@ -152,7 +149,7 @@ export class Node extends TypedEventEmitter<NodeEvents> {
 	/**
 	 * Websocket instance
 	 */
-	public ws: Websocket | null;
+	public ws: WebSocket | null;
 
 	/**
 	 * SessionId of this Lavalink connection (not to be confused with Discord SessionId)
@@ -228,37 +225,30 @@ export class Node extends TypedEventEmitter<NodeEvents> {
 
 		this.emit("debug", `[Socket] -> [${this.name}] : Connecting to ${this.url} ...`);
 
-		const createConnection = async () => {
-			const url = new URL(this.url);
+		const createConnection = (): Promise<WebSocket> =>
+			new Promise<WebSocket>((resolve, reject) => {
+				const ws = new WebSocket(this.url, { headers });
 
-			const server = new Websocket(url.toString(), { headers } as Websocket.ClientOptions);
-
-			server.once("upgrade", (response) => this.open(response));
-			server.on("message", async (data) => {
-				try {
-					await this.message(data);
-				} catch (error) {
-					this.error(error as Error);
-				}
-			});
-			server.on("error", (error) => this.error(error));
-
-			return new Promise<Websocket>((resolve, reject) => {
-				const onOpen = () => {
-					server.removeListener("close", onClose);
-					resolve(server);
+				ws.onmessage = (event: MessageEvent) => {
+					this.message(event.data).catch((error) => this.error(error as Error));
 				};
 
-				function onClose(): void {
-					server.removeListener("open", onOpen);
-					server.removeAllListeners();
-					reject(new Error("Websocket closed before a connection was established"));
-				}
+				ws.onerror = () => {
+					this.error(new Error(`WebSocket connection error to ${this.url}`));
+				};
 
-				server.once("open", onOpen);
-				server.once("close", onClose);
+				ws.onopen = () => {
+					this.open();
+					ws.onclose = (closeEvent: CloseEvent) => {
+						void this.close(closeEvent.code, closeEvent.reason);
+					};
+					resolve(ws);
+				};
+
+				ws.onclose = () => {
+					reject(new Error("WebSocket closed before a connection was established"));
+				};
 			});
-		};
 
 		let connectError: Error | undefined;
 
@@ -290,11 +280,8 @@ export class Node extends TypedEventEmitter<NodeEvents> {
 			}
 
 			this.emit("disconnect", count);
-			// Should I throw or not? :confusion:
 			throw connectError;
 		}
-
-		this.ws!.once("close", (...args) => void this.close(...args));
 	}
 
 	/**
@@ -313,28 +300,21 @@ export class Node extends TypedEventEmitter<NodeEvents> {
 		if (this.ws) {
 			this.ws.close(code, reason);
 		} else {
-			void this.close(1_000, Buffer.from(reason ?? "Unknown Reason", "utf8"));
+			void this.close(1_000, reason ?? "Unknown Reason");
 		}
 	}
 
 	/**
 	 * Handle connection open event from Lavalink
 	 *
-	 * @param response - Response from Lavalink
 	 * @internal
 	 */
-	private open(response: IncomingMessage): void {
+	private open(): void {
 		this.reconnects = 0;
-
-		const resumed = response.headers["session-resumed"] === "true";
-
-		if (!resumed) {
-			this.sessionId = null;
-		}
 
 		this.emit(
 			"debug",
-			`[Socket] <-> [${this.name}] : Connection Handshake Done => ${this.url} | Resumed Header Value: ${resumed} | Lavalink Api Version: ${response.headers["lavalink-api-version"]}`,
+			`[Socket] <-> [${this.name}] : Connection Handshake Done => ${this.url}`,
 		);
 	}
 
@@ -428,8 +408,8 @@ export class Node extends TypedEventEmitter<NodeEvents> {
 	 * @param code - Status close
 	 * @param reason - Reason for connection close
 	 */
-	private async close(code: number, reason: Buffer): Promise<void> {
-		this.emit("close", code, String(reason));
+	private async close(code: number, reason?: string): Promise<void> {
+		this.emit("close", code, reason ?? "Unknown Reason");
 		this.emit("debug", `[Socket] <-/-> [${this.name}] : Connection Closed, Code: ${code || "Unknown Code"}`);
 
 		this.state = State.DISCONNECTING;
@@ -486,8 +466,13 @@ export class Node extends TypedEventEmitter<NodeEvents> {
 	}
 
 	private cleanupWebsocket(): void {
-		this.ws?.removeAllListeners();
-		this.ws?.close();
-		this.ws = null;
+		if (this.ws) {
+			this.ws.onopen = null;
+			this.ws.onmessage = null;
+			this.ws.onerror = null;
+			this.ws.onclose = null;
+			this.ws.close();
+			this.ws = null;
+		}
 	}
 }
